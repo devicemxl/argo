@@ -1,4 +1,4 @@
-para documentar el archivo anexo, podrias ayudarme basandote en el siguiente template, por favor? (en ingles)
+
 
 # 📄 **[NOMBRE DEL ARCHIVO]**
 
