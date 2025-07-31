@@ -10,128 +10,163 @@ import "C"
 import (
 	"context"
 	"fmt"
-	"math"
 	"reflect"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 )
 
-// Constantes basadas en la implementación interna de Go
 const (
-	// Tamaño de página del sistema (típicamente 4KB)
-	pageSize = 4096
-
-	// Tamaño mínimo de chunk
-	minChunkSize = 8192
-
-	// Alineación de memoria
-	ptrAlign = 8
-
-	// Tamaño máximo de objeto individual
+	pageSize      = 4096
+	minChunkSize  = 8192
+	ptrAlign      = 8
 	maxObjectSize = 1 << 20 // 1MB
 )
 
 // chunk representa un bloque de memoria contigua
 type chunk struct {
-	base   uintptr
-	size   uintptr
-	offset uintptr
-	next   *chunk
+	data   []byte  // Mantener referencia al slice para evitar que el GC lo libere
+	base   uintptr // Dirección base
+	size   uintptr // Tamaño total
+	offset uintptr // Offset actual para asignaciones
+	next   *chunk  // Siguiente chunk en la lista
 }
 
-// Arena mejorada basada en la implementación interna
+// Arena implementa una zona de memoria para asignación manual
 type Arena struct {
 	mu     sync.Mutex
 	chunks *chunk
-	freed  uint32 // atomic
+	freed  uint32 // atomic flag
 	stats  arenaStats
 }
 
-// arenaStats mantiene estadísticas de uso
 type arenaStats struct {
 	totalAlloc   uint64
 	totalChunks  uint32
 	currentUsage uint64
 }
 
-// ArenaOption define una función para aplicar opciones a una Arena.
-type ArenaOption func(*Arena)
-
-// NewArena crea una nueva arena con configuración optimizada
-func NewArena(opts ...ArenaOption) *Arena {
+// NewArena crea una nueva arena
+func NewArena() *Arena {
 	a := &Arena{}
-
-	// Aplicar opciones
-	for _, opt := range opts {
-		opt(a)
-	}
-
-	// Crear primer chunk
 	a.newChunk(minChunkSize)
-
 	return a
 }
 
-// newChunk asigna un nuevo chunk de memoria para la arena
+// newChunk crea un nuevo chunk de memoria
 func (a *Arena) newChunk(size uintptr) {
-	size = (size + pageSize - 1) &^ (pageSize - 1) // Alinea al tamaño de página
+	// Alinear al tamaño de página
+	size = (size + pageSize - 1) &^ (pageSize - 1)
 	if size < minChunkSize {
 		size = minChunkSize
 	}
 
-	buf := make([]byte, size) // Asigna memoria en el heap de Go
+	// Crear el slice y mantener la referencia
+	data := make([]byte, size)
+
 	newChunk := &chunk{
-		base:   uintptr(unsafe.Pointer(&buf[0])),
+		data:   data, // CRÍTICO: mantener referencia al slice
+		base:   uintptr(unsafe.Pointer(&data[0])),
 		size:   size,
 		offset: 0,
+		next:   a.chunks,
 	}
 
-	// Agrega el nuevo chunk al frente de la lista
-	newChunk.next = a.chunks
 	a.chunks = newChunk
-
 	a.stats.totalChunks++
-	a.stats.totalAlloc += uint64(size) // Contabiliza el tamaño total del chunk
+	a.stats.totalAlloc += uint64(size)
 }
 
-// Free libera toda la memoria asignada por la arena.
-// Debe llamarse explícitamente cuando la arena ya no se necesita.
+// Free libera toda la memoria de la arena
 func (a *Arena) Free() {
-	if atomic.LoadUint32(&a.freed) == 1 {
+	if !atomic.CompareAndSwapUint32(&a.freed, 0, 1) {
 		return // Ya liberado
 	}
-
-	atomic.StoreUint32(&a.freed, 1) // Marca la arena como liberada
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	// Desreferencia los chunks para que el GC de Go pueda reclamar la memoria
+	// Limpiar todos los chunks
 	current := a.chunks
 	for current != nil {
-		// No necesitamos liberar explícitamente con C.free porque make([]byte, ...)
-		// asigna en el heap de Go. El GC de Go se encargará.
-		// Solo aseguramos que las referencias se rompan.
+		next := current.next
+		// Limpiar referencias
+		current.data = nil
 		current.base = 0
 		current.size = 0
 		current.offset = 0
-		next := current.next
-		current.next = nil // Rompe la cadena para evitar retención cíclica
+		current.next = nil
 		current = next
 	}
+
 	a.chunks = nil
-	a.stats = arenaStats{} // Resetea las estadísticas
+	a.stats = arenaStats{}
 }
 
-// Alloc asigna un bloque de memoria alineado dentro de la arena.
-func (a *Arena) Alloc(size uintptr, align uintptr) unsafe.Pointer {
+// New crea un nuevo objeto de tipo T en la arena (conservando el nombre original)
+func New[T any](a *Arena) *T {
 	if atomic.LoadUint32(&a.freed) == 1 {
 		panic("arena: use after free")
 	}
 
+	var zero T
+	typ := reflect.TypeOf(zero)
+	size := typ.Size()
+	align := uintptr(typ.Align())
+
+	ptr := a.Alloc(size, align)
+	if ptr == nil {
+		panic("arena: allocation failed")
+	}
+
+	// Inicializar con valor zero
+	result := (*T)(ptr)
+	*result = zero
+
+	return result
+}
+
+// MakeSlice crea un slice de tipo T en la arena (conservando el nombre original)
+func MakeSlice[T any](a *Arena, len, cap int) []T {
+	if atomic.LoadUint32(&a.freed) == 1 {
+		panic("arena: use after free")
+	}
+
+	if len < 0 || cap < 0 || len > cap {
+		panic("arena: invalid slice dimensions")
+	}
+
+	if cap == 0 {
+		return nil
+	}
+
+	var zero T
+	elemSize := reflect.TypeOf(zero).Size()
+	totalSize := uintptr(cap) * elemSize
+
+	ptr := a.Alloc(totalSize, ptrAlign)
+	if ptr == nil {
+		panic("arena: allocation failed")
+	}
+
+	// Crear el slice header
+	slice := (*reflect.SliceHeader)(unsafe.Pointer(&[]T{}))
+	slice.Data = uintptr(ptr)
+	slice.Len = len
+	slice.Cap = cap
+
+	return *(*[]T)(unsafe.Pointer(slice))
+}
+
+// Alloc es la función pública de asignación (conservando el nombre original)
+func (a *Arena) Alloc(size, align uintptr) unsafe.Pointer {
 	if size == 0 {
 		return nil
+	}
+
+	if size > maxObjectSize {
+		panic("arena: object too large")
 	}
 
 	a.mu.Lock()
@@ -139,260 +174,198 @@ func (a *Arena) Alloc(size uintptr, align uintptr) unsafe.Pointer {
 
 	current := a.chunks
 	if current == nil {
-		// Esto no debería pasar si NewArena siempre crea el primer chunk
-		// o si la arena no fue liberada prematuramente.
-		// Crear uno nuevo como fallback.
-		a.newChunk(size)
-		current = a.chunks
+		panic("arena: no chunks available")
 	}
 
-	// Alinea el offset
+	// Alinear el offset
 	alignedOffset := (current.offset + align - 1) &^ (align - 1)
 
-	// Verifica si el chunk actual tiene suficiente espacio
+	// Verificar si hay suficiente espacio
 	if alignedOffset+size > current.size {
-		// No hay suficiente espacio, crea un nuevo chunk
-		// El tamaño del nuevo chunk debe ser al menos el minChunkSize o lo suficientemente grande para la asignación actual
-		newChunkSize := uintptr(math.Max(float64(minChunkSize), float64(size+align)))
-		a.newChunk(newChunkSize)
-		current = a.chunks // El nuevo chunk siempre se añade al frente
-		alignedOffset = (current.offset + align - 1) &^ (align - 1)
-
-		if alignedOffset+size > current.size {
-			// Si todavía no hay suficiente espacio (ej. size es mayor que maxObjectSize),
-			// esto indicaría un problema, pero para simplificar, se asume que newChunkSize lo maneja.
-			return nil // Esto podría ser un pánico si prefieres un error irrecuperable
+		// Crear nuevo chunk
+		newSize := uintptr(minChunkSize)
+		if size+align > uintptr(minChunkSize) {
+			newSize = size + align + pageSize
 		}
+		a.newChunk(newSize)
+		current = a.chunks
+		alignedOffset = (current.offset + align - 1) &^ (align - 1)
 	}
 
-	ptr := current.base + alignedOffset
+	ptr := unsafe.Pointer(current.base + alignedOffset)
 	current.offset = alignedOffset + size
-
-	// Actualiza estadísticas
 	a.stats.currentUsage += uint64(size)
 
-	return unsafe.Pointer(ptr)
+	return ptr
 }
 
-// CString copia un string de Go a memoria de C gestionada por la arena.
-func (a *Arena) CString(s string) unsafe.Pointer {
-	if len(s) == 0 {
-		// Devuelve un puntero a una cadena vacía válida en C
-		// o NULL, dependiendo del comportamiento deseado.
-		// Para Arena, es mejor devolver un puntero a un byte nulo asignado.
-		nullBytePtr := a.Alloc(1, 1) // Asigna 1 byte para el terminador nulo
-		*(*C.char)(nullBytePtr) = 0  // Asegura que sea un null terminator
-		return nullBytePtr
-	}
-
-	size := uintptr(len(s)) + 1 // +1 para el terminador nulo de C
-	cptr := a.Alloc(size, 1)
-	if cptr == nil {
-		return nil
-	}
-	copy(unsafe.Slice((*byte)(cptr), size), s)
-	*(*C.char)(unsafe.Pointer(uintptr(cptr) + uintptr(len(s)))) = 0 // Terminador nulo
-
-	return cptr
+// Clone hace una copia del valor fuera de la arena (similar a la API oficial)
+func Clone[T any](value T) T {
+	// Para tipos simples, simplemente devolver el valor
+	// Para tipos con punteros, necesitaríamos una implementación más compleja
+	return value
 }
 
-// GoString convierte un puntero a char de C (gestionado por la arena) a un string de Go.
-func (a *Arena) GoString(cptr *byte) string {
-	if cptr == nil {
-		return ""
+// Handle representa un puntero manejado a datos en la arena
+type Handle[T any] struct {
+	ptr   unsafe.Pointer
+	arena *Arena
+	len   int
+}
+
+// NewHandle crea un nuevo handle para un array en la arena
+func NewHandle[T any](a *Arena, data []T) *Handle[T] {
+	if atomic.LoadUint32(&a.freed) == 1 {
+		panic("arena: use after free")
 	}
-	// Asumimos que cptr apunta a una cadena terminada en nulo
-	length := 0
-	for p := uintptr(unsafe.Pointer(cptr)); ; p++ {
-		if *(*C.char)(unsafe.Pointer(p)) == 0 {
-			break
+
+	if len(data) == 0 {
+		return &Handle[T]{
+			ptr:   nil,
+			arena: a,
+			len:   0,
 		}
-		length++
-	}
-	return string(unsafe.Slice(cptr, length))
-}
-
-// GoBytes copia bytes de memoria de C (gestionada por la arena) a un slice de bytes de Go.
-func (a *Arena) GoBytes(cptr *byte, length int) []byte {
-	if cptr == nil || length <= 0 {
-		return nil
 	}
 
-	goBytesPtr := a.Alloc(uintptr(length), 1) // 1-byte alignment is sufficient for bytes
-	if goBytesPtr == nil {
-		return nil
-	}
+	// Crear slice en la arena
+	arenaSlice := MakeSlice[T](a, len(data), len(data))
 
-	C.memcpy(goBytesPtr, unsafe.Pointer(cptr), C.size_t(length))
-
-	return unsafe.Slice((*byte)(goBytesPtr), length)
-}
-
-// NewHandle crea un Handle para un array de Go, copiándolo a la arena.
-func NewHandle[T any](arena *Arena, slice []T) *Handle[T] {
-	if len(slice) == 0 {
-		return nil
-	}
-
-	typ := reflect.TypeOf(slice).Elem()
-	elemSize := typ.Size()
-	totalSize := uintptr(len(slice)) * elemSize
-	align := typ.Align()
-
-	ptr := arena.Alloc(totalSize, uintptr(align))
-	if ptr == nil {
-		return nil
-	}
-
-	// Copiar los datos del slice de Go al bloque de memoria de la arena
-	srcSliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(&slice))
-	dstSliceHeader := &reflect.SliceHeader{
-		Data: uintptr(ptr),
-		Len:  len(slice),
-		Cap:  len(slice),
-	}
-	C.memcpy(unsafe.Pointer(dstSliceHeader.Data), unsafe.Pointer(srcSliceHeader.Data), C.size_t(totalSize))
+	// Copiar datos
+	copy(arenaSlice, data)
 
 	return &Handle[T]{
-		ptr:     ptr,
-		arena:   arena, // Mantener referencia a la arena para asegurar que no se libere prematuramente
-		elemTyp: typ,
-		len:     len(slice),
+		ptr:   unsafe.Pointer(&arenaSlice[0]),
+		arena: a,
+		len:   len(data),
 	}
 }
 
-// Handle representa un puntero a un bloque de memoria de la arena que contiene un array de Go.
-type Handle[T any] struct {
-	ptr     unsafe.Pointer
-	arena   *Arena // Mantener referencia a la arena
-	elemTyp reflect.Type
-	len     int
-}
-
-// Ptr devuelve el puntero C al inicio del array en la arena.
+// Ptr devuelve el puntero unsafe
 func (h *Handle[T]) Ptr() unsafe.Pointer {
 	return h.ptr
 }
 
-// Get devuelve el array de Go desde la memoria de la arena.
+// Get devuelve el slice de Go
 func (h *Handle[T]) Get() []T {
 	if h.ptr == nil {
 		return nil
 	}
 
-	sliceHeader := &reflect.SliceHeader{
+	sliceHeader := reflect.SliceHeader{
 		Data: uintptr(h.ptr),
 		Len:  h.len,
 		Cap:  h.len,
 	}
-	return *(*[]T)(unsafe.Pointer(sliceHeader))
+
+	return *(*[]T)(unsafe.Pointer(&sliceHeader))
 }
 
-// CStringArray convierte un slice de strings de Go a un array de C strings en la arena.
-func (a *Arena) CStringArray(goStrings []string) unsafe.Pointer {
+// Stats devuelve las estadísticas de la arena
+func (a *Arena) Stats() arenaStats {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stats
+}
+
+// PrintArenaStats imprime las estadísticas (conservando el nombre original)
+func (a *Arena) PrintArenaStats() {
+	stats := a.Stats()
+	fmt.Printf("Arena Stats: Total Chunks: %d, Total Allocated: %d bytes, Current Usage: %d bytes\n",
+		stats.totalChunks, stats.totalAlloc, stats.currentUsage)
+}
+
+// WithArena ejecuta una función con una arena que se libera automáticamente
+func WithArena[T any](f func(*Arena) T) T {
+	a := NewArena()
+	defer a.Free()
+
+	// Mantener la arena viva durante la ejecución
+	runtime.KeepAlive(a)
+
+	return f(a)
+}
+
+// WithArenaContext similar a WithArena pero con contexto
+func WithArenaContext[T any](ctx context.Context, f func(context.Context, *Arena) T) T {
+	a := NewArena()
+	defer a.Free()
+
+	runtime.KeepAlive(a)
+
+	return f(ctx, a)
+}
+
+// CString converts a Go string to a C string (char*).
+// The returned C string is allocated in the Go heap and MUST be freed by C.free.
+func CString(s string) *C.char {
+	return C.CString(s)
+}
+
+// GoString converts a C string (char*) to a Go string.
+// It assumes the C string is null-terminated.
+func GoString(cptr *C.char) string {
+	if cptr == nil {
+		return ""
+	}
+	return C.GoString(cptr)
+}
+
+// GoBytes converts a C byte array (void* or char*) of a given length to a Go byte slice.
+func GoBytes(cptr *C.char, length int) []byte {
+	if cptr == nil || length <= 0 {
+		return nil
+	}
+	return C.GoBytes(unsafe.Pointer(cptr), C.int(length))
+}
+
+// CStringArray converts a Go string slice to a C array of char* (char**).
+// Each C string and the array of pointers itself are allocated in the C heap
+// and MUST be freed by calling C.free on each string and then on the array pointer.
+//
+// Alternatively, and preferably in the context of an Arena, you could implement a
+// version that allocates these strings within the Arena itself, but for general CGO
+// interoperability, this standard approach is more common.
+// Given your Arena, a better approach might be to allocate each C string within the arena,
+// and then create the `char**` array also in the arena.
+// For now, I'll provide the standard C.CString approach which allocates in the Go heap.
+func CStringArray(goStrings []string) **C.char {
 	if len(goStrings) == 0 {
 		return nil
 	}
 
-	// 1. Asignar memoria en la arena para el array de punteros char*
-	// Cada puntero char* es de tamaño unsafe.Sizeof((*C.char)(nil))
-	ptrArraySize := uintptr(len(goStrings)) * unsafe.Sizeof((*C.char)(nil))
-	cptrArray := a.Alloc(ptrArraySize, ptrAlign)
-	if cptrArray == nil {
-		return nil
+	// Allocate a C array of char*
+	// Using C.malloc for the array of pointers, so it can be passed to C functions
+	// The individual strings converted by C.CString are allocated by Go runtime
+	// and need to be freed individually using C.free.
+	cArray := C.malloc(C.size_t(len(goStrings)) * C.sizeof_char_ptr)
+	if cArray == nil {
+		panic("Failed to allocate C array for strings")
 	}
 
-	// 2. Iterar sobre los strings de Go, convertirlos a CString en la arena, y
-	// almacenar sus punteros en el array de punteros
+	// Cast to char**
+	cStrings := (**C.char)(cArray)
+
+	// Populate the C array with C strings
 	for i, s := range goStrings {
-		cstr := a.CString(s) // Convertir Go string a C string en la arena
-		// Almacenar el puntero del C string en la posición correcta del array de punteros
-		*(*unsafe.Pointer)(unsafe.Pointer(uintptr(cptrArray) + uintptr(i)*unsafe.Sizeof((*C.char)(nil)))) = cstr
+		// Allocate individual C string
+		// NOTE: C.CString allocates memory that must be freed with C.free
+		// This is outside the arena management.
+		cs := C.CString(s)
+		// Set the pointer in the C array
+		*(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(cStrings)) + uintptr(i)*unsafe.Sizeof((*C.char)(nil)))) = cs
 	}
 
-	return cptrArray
+	return cStrings
 }
 
-// GoStringArray convierte un array de C strings (char**) a un slice de strings de Go.
-// Asume que los C strings individuales y el array de punteros están gestionados por la arena.
-func (a *Arena) GoStringArray(cstrs **C.char, length int) []string {
-	if cstrs == nil || length <= 0 {
-		return nil
+// FreeCStringArray is a helper to free the memory allocated by CStringArray
+func FreeCStringArray(cStrings **C.char, count int) {
+	if cStrings == nil {
+		return
 	}
-
-	ptrs := (*[1 << 30]*C.char)(unsafe.Pointer(cstrs))[:length:length]
-	result := make([]string, length)
-
-	for i, cstr := range ptrs {
-		if cstr != nil {
-			result[i] = a.GoString((*byte)(unsafe.Pointer(cstr)))
-		}
+	for i := 0; i < count; i++ {
+		strPtr := *(**C.char)(unsafe.Pointer(uintptr(unsafe.Pointer(cStrings)) + uintptr(i)*unsafe.Sizeof((*C.char)(nil))))
+		C.free(unsafe.Pointer(strPtr))
 	}
-
-	return result
-}
-
-// Estos ejemplos asumen que tienes cgo_utils.h con las funciones correspondientes
-
-// ProcessStringWithArena procesa un string usando C y arena
-func ProcessStringWithArena(input string, multiplier int) string {
-	return WithArena(func(arena *Arena) string {
-		cstr := arena.CString(input)
-
-		// Llamar función C externa
-		cresult := C.process_string((*C.char)(unsafe.Pointer(cstr)), C.int(multiplier))
-		defer C.free(unsafe.Pointer(cresult))
-
-		return arena.GoString((*byte)(unsafe.Pointer(cresult)))
-	})
-}
-
-// ProcessArrayWithArena procesa un array usando C y arena
-// Cambia a []int32
-func ProcessArrayWithArena(numbers []int32, factor int) []int32 {
-	return WithArena(func(arena *Arena) []int32 {
-		handle := NewHandle(arena, numbers)
-
-		// Llamar función C externa
-		// Asegúrate de que C.int sea compatible con int32
-		C.process_array((*C.int)(handle.Ptr()), C.size_t(len(numbers)), C.int(factor))
-
-		return handle.Get()
-	})
-}
-
-// GenerateDataWithArena genera datos en C y los copia a un slice de Go usando arena
-func GenerateDataWithArena(size int) []byte {
-	return WithArena(func(arena *Arena) []byte {
-		cdata := C.generate_data(C.size_t(size))
-		defer C.free(unsafe.Pointer(cdata)) // Liberar la memoria C original
-
-		return arena.GoBytes((*byte)(unsafe.Pointer(cdata)), size)
-	})
-}
-
-// PrintArenaStats imprime las estadísticas actuales de la arena
-func (a *Arena) PrintArenaStats() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	fmt.Printf("Arena Stats: Total Chunks: %d, Total Allocated: %d bytes, Current Usage: %d bytes\n",
-		a.stats.totalChunks, a.stats.totalAlloc, a.stats.currentUsage)
-}
-
-// WithArena es una función de conveniencia para usar la arena.
-// Crea una arena, ejecuta la función f, y luego libera la arena.
-func WithArena[T any](f func(arena *Arena) T) T {
-	a := NewArena()
-	defer a.Free()
-	return f(a)
-}
-
-// WithArenaContext es similar a WithArena pero con un contexto de cancelación.
-func WithArenaContext[T any](ctx context.Context, f func(ctx context.Context, arena *Arena) T) T {
-	a := NewArena()
-	defer a.Free()
-
-	// Monitorear el contexto en un goroutine separado si es necesario para tareas prolongadas
-	// o simplemente pasar el contexto a la función f.
-	return f(ctx, a)
+	C.free(unsafe.Pointer(cStrings))
 }

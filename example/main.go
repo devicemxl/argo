@@ -26,22 +26,22 @@ func advancedStringProcessing() {
 		input := "Hello World"
 
 		// Convertir a C string usando Argo
-		cstr := arena.CString(input)
+		cstr := argo.CString(input)
 
 		results := make(map[string]string)
 
 		// Procesar con múltiples funciones C
 		cUpper := C.to_uppercase((*C.char)(unsafe.Pointer(cstr)))
 		defer C.free(unsafe.Pointer(cUpper))
-		results["uppercase"] = arena.GoString((*byte)(unsafe.Pointer(cUpper)))
+		results["uppercase"] = argo.GoString((*byte)(unsafe.Pointer(cUpper)))
 
 		cLower := C.to_lowercase((*C.char)(unsafe.Pointer(cstr)))
 		defer C.free(unsafe.Pointer(cLower))
-		results["lowercase"] = arena.GoString((*byte)(unsafe.Pointer(cLower)))
+		results["lowercase"] = argo.GoString((*byte)(unsafe.Pointer(cLower)))
 
 		cRepeated := C.process_string((*C.char)(unsafe.Pointer(cstr)), 3)
 		defer C.free(unsafe.Pointer(cRepeated))
-		results["repeated"] = arena.GoString((*byte)(unsafe.Pointer(cRepeated)))
+		results["repeated"] = argo.GoString((*byte)(unsafe.Pointer(cRepeated)))
 
 		// Calcular hash
 		hash := C.simple_hash((*C.char)(unsafe.Pointer(cstr)))
@@ -56,18 +56,21 @@ func advancedStringProcessing() {
 }
 
 // Ejemplo 2: Procesamiento avanzado de arrays
-
 func advancedArrayProcessing() {
 	fmt.Println("\n=== Advanced Array Processing ===")
 
-	// Cambiar a []int32
-	originalArray := []int32{5, 2, 8, 1, 9, 3, 7, 4, 6}
+	// Usar []int en lugar de []int32 para compatibilidad con C.int
+	originalArray := []int{5, 2, 8, 1, 9, 3, 7, 4, 6}
 
 	argo.WithArena(func(arena *argo.Arena) interface{} {
-		handle := argo.NewHandle(arena, originalArray)
-		// Asegúrate de que C.int sea compatible con int32
+		// Usar NewHandle con el array de datos
+		handle := argo.NewHandle[int](arena, originalArray)
+
+		// Obtener puntero para C
 		cArrayPtr := (*C.int)(handle.Ptr())
 		arrayLen := C.size_t(len(originalArray))
+
+		fmt.Printf("  Original: %v\n", handle.Get())
 
 		// Sum
 		sum := C.sum_array(cArrayPtr, arrayLen)
@@ -81,11 +84,11 @@ func advancedArrayProcessing() {
 		minVal := C.min_array(cArrayPtr, arrayLen)
 		fmt.Printf(", Min: %d\n", minVal)
 
-		// Sort (operates in-place on the array in arena memory)
+		// Sort (opera in-place en el array de la arena)
 		C.sort_array(cArrayPtr, arrayLen)
 		fmt.Printf("  Sorted: %v\n", handle.Get())
 
-		// Process (operates in-place on the array in arena memory)
+		// Process (opera in-place en el array de la arena)
 		C.process_array(cArrayPtr, arrayLen, 10)
 		fmt.Printf("  Processed (x10): %v\n", handle.Get())
 
@@ -106,8 +109,8 @@ func bigDataProcessing() {
 		cdata := C.generate_data(C.size_t(size))
 		defer C.free(unsafe.Pointer(cdata))
 
-		// Copiar a Argo de Go
-		godata := arena.GoBytes((*byte)(unsafe.Pointer(cdata)), size)
+		// Copiar a Go usando la arena
+		godata := argo.GoBytes((*byte)(unsafe.Pointer(cdata)), size)
 
 		genTime := time.Since(start)
 
@@ -117,7 +120,7 @@ func bigDataProcessing() {
 
 		// Calcular hash de los datos
 		start = time.Now()
-		cstr := arena.CString(string(godata[:1000])) // Hash de los primeros 1000 bytes
+		cstr := argo.CString(string(godata[:1000])) // Hash de los primeros 1000 bytes
 		hash := C.simple_hash((*C.char)(unsafe.Pointer(cstr)))
 		hashTime := time.Since(start)
 
@@ -144,13 +147,13 @@ func contextualProcessing() {
 			default:
 				// Simular trabajo con C
 				data := fmt.Sprintf("step_%d", i)
-				cstr := arena.CString(data)
+				cstr := argo.CString(data)
 
 				// Procesar con C
 				cresult := C.process_string((*C.char)(unsafe.Pointer(cstr)), 2)
 				defer C.free(unsafe.Pointer(cresult))
 
-				result := arena.GoString((*byte)(unsafe.Pointer(cresult)))
+				result := argo.GoString((*byte)(unsafe.Pointer(cresult)))
 				fmt.Printf("Step %d: %s\n", i, result)
 
 				time.Sleep(200 * time.Millisecond)
@@ -170,7 +173,7 @@ func stringArrayProcessing() {
 		strings := []string{"hello", "world", "from", "go", "and", "c"}
 
 		// Convertir array de strings a C
-		cstrings := arena.CStringArray(strings)
+		cstrings := argo.CStringArray(strings)
 
 		fmt.Printf("Original strings: %v\n", strings)
 
@@ -185,7 +188,7 @@ func stringArrayProcessing() {
 			cUpper := C.to_uppercase(cstr)
 			defer C.free(unsafe.Pointer(cUpper))
 
-			results[str] = arena.GoString((*byte)(unsafe.Pointer(cUpper)))
+			results[str] = argo.GoString((*byte)(unsafe.Pointer(cUpper)))
 		}
 
 		fmt.Printf("Processed strings:\n")
@@ -205,20 +208,18 @@ func cryptoProcessing() {
 
 	argo.WithArena(func(arena *argo.Arena) interface{} {
 		// Encrypt
-		cOriginal := arena.CString(original)
+		cOriginal := argo.CString(original)
 		cEncrypted := C.caesar_cipher((*C.char)(unsafe.Pointer(cOriginal)), C.int(shift))
 		defer C.free(unsafe.Pointer(cEncrypted))
-		encrypted := arena.GoString((*byte)(unsafe.Pointer(cEncrypted)))
+		encrypted := argo.GoString((*byte)(unsafe.Pointer(cEncrypted)))
 		fmt.Printf("Original: %s\n", original)
 		fmt.Printf("Encrypted: %s\n", encrypted)
 
-		// Decrypt (using the same shift, should effectively be -shift, which normalizes to the original shift for ROT13)
-		// Decrypt
-		cEncryptedForDecryption := arena.CString(encrypted)
-		// CAMBIO AQUI: Usar caesar_cipher con el mismo shift para ROT13
-		cDecrypted := C.caesar_cipher((*C.char)(unsafe.Pointer(cEncryptedForDecryption)), C.int(shift)) // Originalmente C.caesar_decipher
+		// Decrypt (para ROT13, aplicar el mismo shift otra vez)
+		cEncryptedForDecryption := argo.CString(encrypted)
+		cDecrypted := C.caesar_cipher((*C.char)(unsafe.Pointer(cEncryptedForDecryption)), C.int(shift))
 		defer C.free(unsafe.Pointer(cDecrypted))
-		decrypted := arena.GoString((*byte)(unsafe.Pointer(cDecrypted)))
+		decrypted := argo.GoString((*byte)(unsafe.Pointer(cDecrypted)))
 		fmt.Printf("Decrypted: %s\n", decrypted)
 
 		return nil
@@ -274,7 +275,7 @@ func validationProcessing() {
 		}
 
 		for _, data := range testData {
-			cstr := arena.CString(data)
+			cstr := argo.CString(data)
 
 			// Validar email
 			isEmail := bool(C.is_valid_email((*C.char)(unsafe.Pointer(cstr))))
@@ -303,7 +304,7 @@ func detailedBenchmark() {
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
 		input := fmt.Sprintf("benchmark_test_%d", i)
-		cstr := C.CString(input) // C.CString está disponible aquí gracias al import "C"
+		cstr := C.CString(input) // C.CString estándar
 
 		// Múltiples operaciones
 		cUpper := C.to_uppercase(cstr)
@@ -324,7 +325,7 @@ func detailedBenchmark() {
 	argo.WithArena(func(arena *argo.Arena) interface{} {
 		for i := 0; i < iterations; i++ {
 			input := fmt.Sprintf("benchmark_test_%d", i)
-			cstr := arena.CString(input)
+			cstr := argo.CString(input)
 
 			// Múltiples operaciones
 			cUpper := C.to_uppercase((*C.char)(unsafe.Pointer(cstr)))
@@ -339,7 +340,7 @@ func detailedBenchmark() {
 		}
 		return nil
 	})
-	ArgoTime := time.Since(start)
+	argoTime := time.Since(start)
 
 	// Estadísticas de memoria
 	var m1, m2 runtime.MemStats
@@ -351,27 +352,27 @@ func detailedBenchmark() {
 
 	fmt.Printf("Performance Results:\n")
 	fmt.Printf("  Traditional CGO: %v\n", traditional)
-	fmt.Printf("  Argo CGO: %v\n", ArgoTime)
-	fmt.Printf("  Improvement: %.2fx faster\\n", float64(traditional)/float64(ArgoTime))
-	fmt.Printf("  Memory after GC: %d KB\\n", m2.Alloc/1024)
-	fmt.Printf("  Total allocations: %d\\n", m2.TotalAlloc/1024)
+	fmt.Printf("  Argo CGO: %v\n", argoTime)
+	fmt.Printf("  Improvement: %.2fx faster\n", float64(traditional)/float64(argoTime))
+	fmt.Printf("  Memory after GC: %d KB\n", m2.Alloc/1024)
+	fmt.Printf("  Total allocations: %d KB\n", m2.TotalAlloc/1024)
 }
 
 // Ejemplo 10: Monitoreo de Argo
-func ArgoMonitoring() {
+func argoMonitoring() {
 	fmt.Println("\n=== Argo Monitoring ===")
 
 	arena := argo.NewArena()
-	defer arena.Free()
+	defer argo.Free()
 
 	// Mostrar estadísticas iniciales
 	fmt.Println("Initial stats:")
-	arena.PrintArenaStats()
+	argo.PrintArenaStats()
 
 	// Realizar algunas operaciones
 	for i := 0; i < 100; i++ {
 		input := fmt.Sprintf("monitoring_test_%d", i)
-		cstr := arena.CString(input)
+		cstr := argo.CString(input)
 
 		cUpper := C.to_uppercase((*C.char)(unsafe.Pointer(cstr)))
 		C.free(unsafe.Pointer(cUpper))
@@ -379,7 +380,7 @@ func ArgoMonitoring() {
 
 	// Mostrar estadísticas finales
 	fmt.Println("\nFinal stats:")
-	arena.PrintArenaStats()
+	argo.PrintArenaStats()
 }
 
 func main() {
@@ -394,7 +395,7 @@ func main() {
 	mathProcessing()
 	validationProcessing()
 	detailedBenchmark()
-	ArgoMonitoring()
+	argoMonitoring()
 
 	fmt.Println("\n=== All examples completed ===")
 }
