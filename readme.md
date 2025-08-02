@@ -16,6 +16,7 @@
 - **🎯 Type-Safe Handles** - Generic array handling with type safety
 - **🧵 Thread-Safe** - Concurrent access protection
 - **⚙️ Context Support** - Timeout and cancellation support
+- **🧩 Modular Design** - Clean separation between core library and examples
 
 ## 📦 Installation
 
@@ -31,7 +32,7 @@ go get github.com/devicemxl/argo
 
 ## 🎯 Quick Start
 
-### Basic Usage
+### Basic Usage (Pure Arena)
 
 ```go
 package main
@@ -55,7 +56,7 @@ func main() {
 }
 ```
 
-### CGO Integration
+### CGO Integration Example
 
 ```go
 /*
@@ -73,28 +74,28 @@ char* process_string(const char* input, int multiplier) {
 }
 */
 import "C"
+import "unsafe"
 
 func ProcessWithCGO() {
     result := argo.WithArena(func(arena *argo.Arena) string {
-        // Convert Go string to C string (in arena memory)
-        input := "Go+C "
-        cstr := arena.CString(input)
+        // Use UnsafeCString for CGO compatibility
+        cstr := arena.UnsafeCString("Go+C ")
         
         // Call C function
-        cresult := C.process_string(cstr, 3)
-        defer C.free(unsafe.Pointer(cresult)) // Free C-allocated memory
+        cresult := C.process_string((*C.char)(cstr), 3)
+        defer C.free(unsafe.Pointer(cresult))
         
         // Convert C result back to Go string
-        return arena.GoString(cresult)
+        return C.GoString(cresult)
     })
     
     fmt.Println(result) // Output: Go+C Go+C Go+C 
 }
 ```
 
-## 📚 API Reference
+## 📚 Core API Reference
 
-### Core Arena Operations
+### Arena Operations
 
 #### `NewArena(opts ...ArenaOption) *Arena`
 Creates a new memory arena with optional configuration.
@@ -124,7 +125,14 @@ arena.Free() // Releases all allocated memory
 Converts Go string to null-terminated C string in arena memory.
 
 ```go
-cstr := arena.CString("Hello") // No need to free - managed by arena
+cstr := arena.CString("Hello") // Managed by arena
+```
+
+#### `arena.UnsafeCString(s string) unsafe.Pointer`
+Returns unsafe.Pointer for CGO compatibility across packages.
+
+```go
+cstr := arena.UnsafeCString("Hello") // For CGO interop
 ```
 
 #### `arena.GoString(cstr *C.char) string`
@@ -132,6 +140,13 @@ Converts C string to Go string.
 
 ```go
 goStr := arena.GoString(cstr)
+```
+
+#### `arena.GoBytes(cptr unsafe.Pointer, length int) []byte`
+Copies C data to Go byte slice.
+
+```go
+bytes := arena.GoBytes(cptr, 100)
 ```
 
 #### `arena.CStringArray(strings []string) **C.char`
@@ -189,6 +204,16 @@ result := argo.WithArenaContext(ctx, func(ctx context.Context, arena *argo.Arena
 })
 ```
 
+### Memory Statistics
+
+#### `arena.PrintArenaStats()`
+Prints detailed memory usage statistics.
+
+```go
+arena.PrintArenaStats()
+// Output: Arena Stats: Chunks: 2, Total: 16384 bytes, Used: 8192 bytes
+```
+
 ## 🔧 Advanced Usage
 
 ### Custom Arena Configuration
@@ -205,72 +230,60 @@ arena := argo.NewArena(WithInitialSize(1024*1024)) // 1MB initial
 defer arena.Free()
 ```
 
-### Memory Statistics
+### Thread Safety
 
 ```go
+// Arena is thread-safe for concurrent access
 arena := argo.NewArena()
 defer arena.Free()
 
-// Perform operations...
-// ...
-
-// Print memory usage statistics
-arena.PrintArenaStats()
-// Output: Arena Stats: Chunks: 2, Total: 16384 bytes, Used: 8192 bytes
+var wg sync.WaitGroup
+for i := 0; i < 10; i++ {
+    wg.Add(1)
+    go func(id int) {
+        defer wg.Done()
+        data := fmt.Sprintf("worker-%d", id)
+        cstr := arena.CString(data) // Safe concurrent access
+        // Process data...
+    }(i)
+}
+wg.Wait()
 ```
 
-### Complex CGO Example
+## 🧩 Example Demonstrations
 
-```go
-/*
-#include "your_library.h"
+The `example/` directory contains a comprehensive demonstration of Argo's capabilities with various C utility functions:
 
-typedef struct {
-    int* data;
-    size_t length;
-} IntArray;
+### Running the Complete Example
 
-IntArray* process_array(int* input, size_t len, int factor) {
-    IntArray* result = malloc(sizeof(IntArray));
-    result->data = malloc(len * sizeof(int));
-    result->length = len;
-    
-    for (size_t i = 0; i < len; i++) {
-        result->data[i] = input[i] * factor;
-    }
-    
-    return result;
-}
-*/
-import "C"
+```bash
+# Build and run the full example
+make run
 
-func ProcessArrayWithArena() {
-    numbers := []int32{1, 2, 3, 4, 5}
-    
-    result := argo.WithArena(func(arena *argo.Arena) []int32 {
-        // Create handle for input array
-        handle := argo.NewHandle(arena, numbers)
-        
-        // Call C function
-        cresult := C.process_array(
-            (*C.int)(handle.Ptr()), 
-            C.size_t(len(numbers)), 
-            C.int(10),
-        )
-        defer C.free(unsafe.Pointer(cresult.data))
-        defer C.free(unsafe.Pointer(cresult))
-        
-        // Copy result back to arena-managed memory
-        resultSize := int(cresult.length)
-        resultPtr := arena.Alloc(uintptr(resultSize)*4, 4) // 4 bytes per int32
-        C.memcpy(resultPtr, unsafe.Pointer(cresult.data), C.size_t(resultSize*4))
-        
-        // Create Go slice from arena memory
-        return unsafe.Slice((*int32)(resultPtr), resultSize)
-    })
-    
-    fmt.Printf("Result: %v\n", result) // [10, 20, 30, 40, 50]
-}
+# Or manually:
+cd example && go run .
+```
+
+### Example Features Demonstrated
+
+- **String Processing**: Repetition, concatenation, case conversion
+- **Array Operations**: In-place modification, aggregation, sorting
+- **Data Generation**: Sequences, random arrays, pattern data
+- **Mathematical Functions**: Fast power, Newton's square root, factorial
+- **Cryptography**: Caesar cipher encryption/decryption
+- **Validation**: Email and URL format checking
+- **Data Conversion**: Hex encoding/decoding, hash functions
+- **Bit Operations**: Bit counting, bit reversal
+- **Performance Comparison**: GC vs GC-free benchmarks
+
+### Example Structure
+
+```
+example/
+├── main.go      # Main demonstration program
+├── argoFun.go   # CGO wrapper functions for C utilities
+├── cgo_utils.c  # C implementation of utility functions
+└── cgo_utils.h  # C header declarations
 ```
 
 ## 🚀 Performance Benefits
@@ -320,28 +333,9 @@ defer arena.Free()
 data := processData(arena)
 
 // ❌ BAD: Forgetting to free
-arena := argo.NewArena()
+arena := argo.NewArena()  
 data := processData(arena)
 // Memory leak! (though finalizer will eventually clean up)
-```
-
-### Thread Safety
-```go
-// Arena is thread-safe for concurrent access
-arena := argo.NewArena()
-defer arena.Free()
-
-var wg sync.WaitGroup
-for i := 0; i < 10; i++ {
-    wg.Add(1)
-    go func(id int) {
-        defer wg.Done()
-        data := fmt.Sprintf("worker-%d", id)
-        cstr := arena.CString(data) // Safe concurrent access
-        // Process data...
-    }(i)
-}
-wg.Wait()
 ```
 
 ## 🛠️ Building and Testing
@@ -364,17 +358,35 @@ make test
 make benchmark
 ```
 
+### Available Make Targets
+
+```bash
+make build         # Build the example
+make run           # Build and run examples
+make test          # Run tests for main library
+make test-example  # Run tests for example
+make test-module   # Test that argo.go compiles independently
+make benchmark     # Run benchmarks
+make clean         # Remove generated files
+make debug         # Build with debug symbols
+make release       # Build with optimizations
+make check         # Verify all files are present
+make info          # Show system information
+make help          # Show all available targets
+```
+
 ### Project Structure
 ```
 argo/
-├── argo.go              # Main arena implementation
-├── cgo_utils.c          # C utility functions
-├── cgo_utils.h          # C headers
-├── example/
-│   └── main.go          # Complete usage examples
+├── argo.go              # Core arena implementation (CGO-free)
+├── example/             # Complete usage examples
+│   ├── main.go          # Example demonstrations
+│   ├── argoFun.go       # CGO wrapper functions
+│   ├── cgo_utils.c      # C utility implementations
+│   └── cgo_utils.h      # C header declarations
 ├── Makefile             # Build configuration
 ├── go.mod               # Go module definition
-└── README.md            # This file
+└── README.md            # This documentation
 ```
 
 ## 📊 Monitoring and Debugging
@@ -384,18 +396,7 @@ argo/
 make debug  # Build with debug symbols
 ```
 
-### Memory Statistics
-```go
-arena := argo.NewArena()
-defer arena.Free()
-
-// Your operations...
-
-arena.PrintArenaStats()
-// Output detailed memory usage information
-```
-
-### Common Patterns
+### Memory Usage Patterns
 ```go
 // Pattern 1: Batch processing
 argo.WithArena(func(arena *argo.Arena) {
@@ -418,11 +419,41 @@ for {
 }
 ```
 
+## 🧪 Testing Your Integration
+
+### Basic Test
+```go
+func TestArenaIntegration(t *testing.T) {
+    result := argo.WithArena(func(arena *argo.Arena) string {
+        return arena.GoString(arena.CString("test"))
+    })
+    
+    if result != "test" {
+        t.Errorf("Expected 'test', got '%s'", result)
+    }
+}
+```
+
+### CGO Integration Test
+```go
+func TestCGOIntegration(t *testing.T) {
+    // Your CGO function tests here
+    result := argo.WithArena(func(arena *argo.Arena) bool {
+        // Test your specific CGO functions
+        return testYourCGOFunction(arena)
+    })
+    
+    if !result {
+        t.Error("CGO integration test failed")
+    }
+}
+```
+
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Run tests (`make test`)
+3. Run tests (`make test && make test-example`)
 4. Commit your changes (`git commit -am 'Add amazing feature'`)
 5. Push to the branch (`git push origin feature/amazing-feature`)
 6. Open a Pull Request
@@ -435,7 +466,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Inspired by Go's experimental arena proposal
 - Built for high-performance CGO applications
-- Designed with memory safety in mind
+- Designed with memory safety and modularity in mind
 
 ## 📞 Support
 
