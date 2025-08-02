@@ -355,3 +355,8 @@ func max(a, b uintptr) uintptr {
 	}
 	return b
 }
+
+// UnsafePointer devuelve el unsafe.Pointer del CString para compatibilidad entre paquetes CGO
+func (a *Arena) UnsafeCString(s string) unsafe.Pointer {
+	return unsafe.Pointer(a.CString(s))
+}
