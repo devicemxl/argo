@@ -1,5 +1,6 @@
 At its core, Argo utilizes C’s malloc() and free() functions to manage memory entirely outside of Go's heap. This approach ensures that memory operations remain invisible to Go's garbage collector, thereby enhancing performance and reducing overhead.
 
+![image](https://miro.medium.com/v2/resize:fit:4800/format:webp/1*1GuhLjpPqkbKH8rucZv1Vw.png)
 
 Here's a comprehensive test for the `newChunkC` function! This demonstration shows:
 
