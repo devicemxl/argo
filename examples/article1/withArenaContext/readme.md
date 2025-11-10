@@ -1,3 +1,7 @@
+# Context Support for Long-Running Operations
+
+Argo provides robust support for context management, making it well-suited for long-running operations. This feature allows you to efficiently handle timeouts and cancellations, ensuring that your operations are both safe and responsive. 
+
 To test the functionality described in the text, we can create a simple Go program that uses the Argo library to manage a long-running operation with context support. This will help us verify that the context management and timeout features work as expected.
 
 Since we can't directly execute Go code here, I'll provide you with a complete example that you can run in your local Go environment. This example will simulate a long-running operation and demonstrate how context management with Argo can handle timeouts and cancellations.
