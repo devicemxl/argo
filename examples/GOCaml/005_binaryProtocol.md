@@ -1,4 +1,4 @@
-# **Example 4: Custom Binary Protocol via Argo Arenas**
+# **Example 5: Custom Binary Protocol via Argo Arenas**
 
 This advanced example demonstrates a full-cycle, zero-copy protocol. Go provisions an `argo` arena and formats a binary payload. OCaml parses the payload dynamically, computes a mathematical sum, writes the result back into the reserved arena slot *in-place*, and returns a status string.
 
